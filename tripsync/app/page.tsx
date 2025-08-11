@@ -1,41 +1,29 @@
+// app/page.tsx
 "use client";
 
 import { useEffect, useState } from "react";
+import { useRouter } from "next/navigation";
 import { auth } from "@/lib/firebase";
-import { onAuthStateChanged, signOut } from "firebase/auth";
-import Link from "next/link";
+import { onAuthStateChanged } from "firebase/auth";
 
-export default function Home() {
-  const [user, setUser] = useState<any>(null);
-  const [loading, setLoading] = useState(true);
+export default function RootRedirect() {
+  const router = useRouter();
+  const [ready, setReady] = useState(false);
 
-  useEffect(()=>{
-    const off = onAuthStateChanged(auth, (u)=>{
-      setUser(u);
-      setLoading(false);
+  useEffect(() => {
+    const off = onAuthStateChanged(auth, (user) => {
+      // If signed in -> go to events list (protected)
+      if (user) router.replace("/events");
+      else router.replace("/login");
+      setReady(true);
     });
     return () => off();
-  },[]);
+  }, [router]);
 
-  if (loading) return <main style={{padding:20}}>Loading…</main>;
-
-  if (!user) {
-    return (
-      <main style={{padding:20}}>
-        <p>You’re signed out.</p>
-        <Link href="/login">Go to login</Link>
-      </main>
-    );
-  }
-
+  // Simple splash while we decide
   return (
-    <main style={{padding:20}}>
-      <p>Signed in as <b>{user.email}</b></p>
-      <button onClick={()=>signOut(auth)}>Sign out</button>
-
-      {/* Later: list of events/trips here */}
-      <h2 style={{marginTop:16}}>Your events & trips</h2>
-      <p>(Coming next)</p>
+    <main style={{ minHeight: "100dvh", display: "grid", placeItems: "center" }}>
+      <div style={{ opacity: 0.6 }}>Loading…</div>
     </main>
   );
 }
