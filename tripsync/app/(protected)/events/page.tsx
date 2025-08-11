@@ -1,11 +1,14 @@
+// app/(protected)/events/page.tsx
 "use client";
-import { useEffect, useMemo, useState } from "react";
+
+import { useEffect, useState } from "react";
+import Link from "next/link";
 import { auth, db } from "@/lib/firebase";
+import type { User } from "firebase/auth";
 import {
-  collectionGroup, getDocs, query, where, doc, getDoc, orderBy, limit
+  collection, collectionGroup, doc, getDoc, getDocs, query, where,
 } from "firebase/firestore";
 import { createEvent } from "@/lib/events";
-import Image from "next/image";
 
 type EventDoc = {
   id: string;
@@ -16,61 +19,104 @@ type EventDoc = {
   coverPhotoUrl?: string | null;
 };
 
-export default function HomePage() {
-  const user = auth.currentUser;
+export default function EventsPage() {
+  const [user, setUser] = useState<User | null>(auth.currentUser);
   const [items, setItems] = useState<EventDoc[]>([]);
   const [loading, setLoading] = useState(true);
   const [showNew, setShowNew] = useState<null | "event" | "trip">(null);
 
+  // Keep user in sync
+  useEffect(() => {
+    const off = auth.onAuthStateChanged((u) => setUser(u));
+    return () => off();
+  }, []);
+
+  // Load events for the user
   useEffect(() => {
     if (!user) return;
     (async () => {
       setLoading(true);
-      // find membership rows
-      const q = query(
-        collectionGroup(db, "members"),
-        where("userId", "==", user.uid)
-      );
-      const memSnap = await getDocs(q);
+      try {
+        // 1) Find membership rows (eventId/members/{uid}) by userId field
+        const qMembers = query(
+          collectionGroup(db, "members"),
+          where("userId", "==", user.uid)
+        );
+        const memSnap = await getDocs(qMembers);
 
-      // fetch parent event docs
-      const uniqueEventIds = new Set<string>();
-      memSnap.forEach((m) => {
-        // path: events/{eventId}/members/{uid}
-        const parts = m.ref.path.split("/");
-        // ["events", "{eventId}", "members", "{uid}"]
-        const eventId = parts[1];
-        uniqueEventIds.add(eventId);
-      });
+        // 2) Extract eventIds
+        const eventIds = new Set<string>();
+        memSnap.forEach((m) => {
+          // path: events/{eventId}/members/{uid}
+          const parts = m.ref.path.split("/");
+          const eid = parts[1]; // "events", "{eventId}", "members", "{uid}"
+          if (eid) eventIds.add(eid);
+        });
 
-      const events: EventDoc[] = [];
-      await Promise.all(
-        Array.from(uniqueEventIds).map(async (eventId) => {
-          const e = await getDoc(doc(db, "events", eventId));
-          if (e.exists()) {
-            const d = e.data() as any;
-            events.push({
-              id: e.id,
-              name: d.name,
-              type: d.type,
-              startDate: d.startDate ?? null,
-              endDate: d.endDate ?? null,
-              coverPhotoUrl: d.coverPhotoUrl ?? null,
+        // 3) Fetch each event
+        const list: EventDoc[] = [];
+        await Promise.all(
+          Array.from(eventIds).map(async (eventId) => {
+            const e = await getDoc(doc(db, "events", eventId));
+            if (e.exists()) {
+              const d = e.data() as any;
+              list.push({
+                id: e.id,
+                name: d.name,
+                type: d.type,
+                startDate: d.startDate ?? null,
+                endDate: d.endDate ?? null,
+                coverPhotoUrl: d.coverPhotoUrl ?? null,
+              });
+            }
+          })
+        );
+
+        // 4) Fallback: events you own (in case membership list is empty)
+        if (list.length === 0) {
+          try {
+            const qOwn = query(collection(db, "events"), where("ownerId", "==", user.uid));
+            const ownSnap = await getDocs(qOwn);
+            ownSnap.forEach((e) => {
+              const d = e.data() as any;
+              list.push({
+                id: e.id,
+                name: d.name,
+                type: d.type,
+                startDate: d.startDate ?? null,
+                endDate: d.endDate ?? null,
+                coverPhotoUrl: d.coverPhotoUrl ?? null,
+              });
             });
+          } catch {
+            /* ignore */
           }
-        })
-      );
+        }
 
-      // simple sort: newest created first if exists; otherwise by name
-      events.sort((a, b) => (a.name || "").localeCompare(b.name || ""));
-      setItems(events);
-      setLoading(false);
+        list.sort((a, b) => (a.name || "").localeCompare(b.name || ""));
+        setItems(list);
+      } catch (err: any) {
+        console.error("[events] load error:", err?.code, err?.message, err);
+        setItems([]); // safe empty state
+      } finally {
+        setLoading(false);
+      }
     })();
   }, [user]);
+
+  if (!user) {
+    return (
+      <main className="mx-auto max-w-[402px] p-3">
+        <p>You’re signed out.</p>
+        <Link href="/login" className="text-[#264864] underline">Go to login</Link>
+      </main>
+    );
+  }
 
   return (
     <div className="iphone-wrap">
       <Header />
+
       <main className="content">
         <div className="toolbar">
           <button className="pill" onClick={() => setShowNew("trip")}>+ Trip</button>
@@ -81,7 +127,7 @@ export default function HomePage() {
           <div className="muted">Loading…</div>
         ) : items.length === 0 ? (
           <div className="empty">
-            <div className="muted">No events yet.</div>
+            <div className="muted">No events yet. Tap “+ Trip” or “+ Event”.</div>
           </div>
         ) : (
           <div className="list">
@@ -100,7 +146,7 @@ export default function HomePage() {
                   <div className="sub">
                     {ev.type === "trip"
                       ? dateRange(ev.startDate, ev.endDate)
-                      : "Event"}
+                      : (ev.startDate ? ev.startDate : "Event")}
                   </div>
                 </div>
               </a>
@@ -117,16 +163,23 @@ export default function HomePage() {
           onClose={() => setShowNew(null)}
           onCreate={async (payload) => {
             if (!auth.currentUser) return;
-            const eventId = await createEvent({
-              ownerId: auth.currentUser.uid,
-              type: showNew,
-              name: payload.name,
-              startDate: showNew === "trip" ? payload.startDate : null,
-              endDate: showNew === "trip" ? payload.endDate : null,
-              coverPhotoUrl: null,
-            });
-            // For trips, you’ll add “create days” in the next step.
-            window.location.href = `/events/${eventId}`;
+            try {
+              const eventId = await createEvent({
+                ownerId: auth.currentUser.uid,
+                type: showNew,
+                name: payload.name,
+                // trips:
+                startDate: showNew === "trip" ? payload.startDate ?? null : null,
+                endDate:   showNew === "trip" ? payload.endDate   ?? null : null,
+                // events (single day):
+                eventDate: showNew === "event" ? payload.date ?? null : null,
+                coverPhotoUrl: null,
+              });
+              window.location.href = `/events/${eventId}`;
+            } catch (e: any) {
+              console.error("createEvent failed:", e);
+              alert(e?.message || "Failed to create");
+            }
           }}
         />
       )}
@@ -162,6 +215,8 @@ export default function HomePage() {
     </div>
   );
 }
+
+/* ---------- UI bits ---------- */
 
 function Header() {
   return (
@@ -231,26 +286,56 @@ function NewEventSheet({
 }: {
   mode: "event" | "trip";
   onClose: () => void;
-  onCreate: (payload: { name: string; startDate?: string; endDate?: string }) => Promise<void>;
+  onCreate: (payload: { name: string; date?: string; startDate?: string; endDate?: string }) => Promise<void>;
 }) {
   const [name, setName] = useState("");
+  const [eventDate, setEventDate] = useState("");
   const [startDate, setStart] = useState("");
   const [endDate, setEnd] = useState("");
-  const canSave = name.trim() && (mode === "event" || (startDate && endDate));
+
+  const canSave =
+    !!name.trim() &&
+    (mode === "trip" ? (startDate && endDate) : !!eventDate);
 
   return (
     <div className="sheet" onClick={(e)=>{ if(e.target===e.currentTarget) onClose(); }}>
       <div className="panel">
         <div className="title">{mode === "trip" ? "New Trip" : "New Event"}</div>
-        <label className="lbl">Name</label>
-        <input className="inp" value={name} onChange={e=>setName(e.target.value)} placeholder="Mallorca Friends" />
 
-        {mode === "trip" && (
+        <label className="lbl">Name</label>
+        <input
+          className="inp"
+          value={name}
+          onChange={e=>setName(e.target.value)}
+          placeholder={mode === "trip" ? "Mallorca Friends" : "Birthday Dinner"}
+        />
+
+        {mode === "trip" ? (
           <>
             <label className="lbl">Start date</label>
-            <input className="inp" type="date" value={startDate} onChange={(e)=>setStart(e.target.value)} />
+            <input
+              className="inp"
+              type="date"
+              value={startDate}
+              onChange={(e)=>setStart(e.target.value)}
+            />
             <label className="lbl">End date</label>
-            <input className="inp" type="date" value={endDate} onChange={(e)=>setEnd(e.target.value)} />
+            <input
+              className="inp"
+              type="date"
+              value={endDate}
+              onChange={(e)=>setEnd(e.target.value)}
+            />
+          </>
+        ) : (
+          <>
+            <label className="lbl">Event date</label>
+            <input
+              className="inp"
+              type="date"
+              value={eventDate}
+              onChange={(e)=>setEventDate(e.target.value)}
+            />
           </>
         )}
 
@@ -259,19 +344,30 @@ function NewEventSheet({
           <button
             className="btn primary"
             disabled={!canSave}
-            onClick={()=>onCreate({ name: name.trim(), startDate, endDate })}
+            onClick={() =>
+              onCreate({
+                name: name.trim(),
+                date: mode === "event" ? eventDate : undefined,
+                startDate: mode === "trip" ? startDate : undefined,
+                endDate: mode === "trip" ? endDate : undefined,
+              })
+            }
           >
             Create
           </button>
         </div>
       </div>
+
       <style jsx>{`
         .sheet{
           position:fixed; inset:0; background:rgba(0,0,0,.35);
           display:flex; align-items:flex-end; justify-content:center;
+          z-index:60; /* above bottom nav */
+          padding-bottom: calc(72px + env(safe-area-inset-bottom)); /* clear bottom nav */
         }
         .panel{
-          width:100%; max-width:402px; background:#fff; border-top-left-radius:16px; border-top-right-radius:16px;
+          width:100%; max-width:402px; background:#fff;
+          border-top-left-radius:16px; border-top-right-radius:16px;
           padding:16px; border:1px solid #e2e8f0; border-bottom:0;
         }
         .title{ font-weight:700; margin-bottom:8px; }

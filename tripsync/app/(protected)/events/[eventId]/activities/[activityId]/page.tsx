@@ -1,4 +1,5 @@
 // app/(protected)/events/[eventId]/activities/[activityId]/page.tsx
+import { use } from "react";
 import type { Metadata } from "next";
 import ActivityClient from "./ActivityClient";
 
@@ -7,11 +8,10 @@ export const metadata: Metadata = { title: "Activity" };
 export default function ActivityPage({
   params,
 }: {
-  params: { eventId: string; activityId: string };
+  params: Promise<{ eventId: string; activityId: string }>;
 }) {
-  const { eventId, activityId } = params;
+  // Unwrap the promised route params (Next.js App Router)
+  const { eventId, activityId } = use(params);
 
-  return (
-    <ActivityClient eventId={eventId} activityId={activityId} />
-  );
+  return <ActivityClient eventId={eventId} activityId={activityId} />;
 }

@@ -1,6 +1,7 @@
 // lib/events.ts
 import {
   collection,
+  collectionGroup,
   doc,
   addDoc,
   setDoc,
@@ -10,6 +11,7 @@ import {
   writeBatch,
   orderBy,
   query,
+  where,
 } from "firebase/firestore";
 import { db } from "@/lib/firebase";
 
@@ -32,14 +34,15 @@ function daysBetween(startISO: string, endISO: string) {
    Events / Members / Days / Activities
 ---------------------------------------------------------- */
 
-/** Create an event or trip */
+/** Create an event or trip (normalizes single-day events to start=end and creates the day) */
 export async function createEvent({
   ownerId,
   type,               // "event" | "trip"
   name,
   coverPhotoUrl = null,
-  startDate = null,    // for trips: "YYYY-MM-DD"
-  endDate = null,      // for trips
+  startDate = null,   // trips
+  endDate = null,     // trips
+  eventDate = null,   // single-day event
 }: {
   ownerId: string;
   type: "event" | "trip";
@@ -47,27 +50,39 @@ export async function createEvent({
   coverPhotoUrl?: string | null;
   startDate?: string | null;
   endDate?: string | null;
+  eventDate?: string | null;
 }) {
-  // Auto-ID event doc
-  const eventsCol = collection(db, "events");
-  const ref = await addDoc(eventsCol, {
+  // For single-day events, normalize start/end to the same day for display
+  const normalizedStart = type === "event" ? (eventDate ?? null) : (startDate ?? null);
+  const normalizedEnd   = type === "event" ? (eventDate ?? null) : (endDate ?? null);
+
+  // 1) Create the parent event
+  const ref = await addDoc(collection(db, "events"), {
     ownerId,
     type,
     name,
     coverPhotoUrl,
-    startDate,
-    endDate,
+    startDate: normalizedStart,
+    endDate: normalizedEnd,
     createdAt: serverTimestamp(),
   });
 
-  // Add creator as a member (owner)
+  // 2) Add the owner as a member (role: owner) — include userId so collectionGroup queries work
   await setDoc(doc(db, `events/${ref.id}/members/${ownerId}`), {
     userId: ownerId,
     role: "owner",
     joinedAt: serverTimestamp(),
   });
 
-  return ref.id; // eventId
+  // 3) If it's a single-day event, create one day doc (id = YYYY-MM-DD)
+  if (type === "event" && eventDate) {
+    await setDoc(doc(db, `events/${ref.id}/days/${eventDate}`), {
+      dayId: eventDate,
+      createdAt: serverTimestamp(),
+    });
+  }
+
+  return ref.id;
 }
 
 /** Invite/add a friend as a member */
@@ -93,9 +108,9 @@ export async function addActivity(
   eventId: string,
   activity: {
     title: string;
-    time?: string | null;    // "HH:mm"
-    kind?: string | null;    // "travel" | "hotel" | "activity" | ...
-    dayId?: string | null;   // for trips, link to a day
+    time?: string | null;        // "HH:mm"
+    kind?: string | null;        // "travel" | "hotel" | "activity" | ...
+    dayId?: string | null;       // for trips, link to a day
     refPhotoUrl?: string | null; // optional legacy single reference photo
     notes?: string | null;
   }
@@ -156,6 +171,12 @@ export async function ensureDaysForRange(eventId: string, start: string, end: st
     }
   }
   if (toWrite) await batch.commit();
+}
+
+/** Alias kept for older imports (delegates to ensureDaysForRange) */
+export async function ensureTripDays(eventId: string, start: string | null, end: string | null) {
+  if (!start || !end) return;
+  return ensureDaysForRange(eventId, start, end);
 }
 
 /** Create an invite token (MVP: link you can copy/share) */
