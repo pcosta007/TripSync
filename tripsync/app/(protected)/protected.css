@@ -1,0 +1,26 @@
+:root{
+  --bg:#f2f2f6; /* FitList light grey */
+  --card:#fff; --ink:#0f172a; --muted:#64748b; --accent:#264864; --line:#e2e8f0;
+}
+
+/* make background consistent across protected pages */
+html, body, #__next {
+  background: var(--bg);
+}
+
+body {
+  margin: 0;
+  color: var(--ink);
+}
+
+/* optional helpers you can reuse */
+.iphone-wrap {
+  min-height: 100dvh;
+  padding-bottom: calc(72px + env(safe-area-inset-bottom));
+}
+
+.content {
+  max-width: 402px;
+  margin: 0 auto;
+  padding: 10px;
+}

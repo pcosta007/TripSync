@@ -12,6 +12,7 @@ import {
   orderBy,
   query,
   where,
+  limit,
 } from "firebase/firestore";
 import { db } from "@/lib/firebase";
 
@@ -19,7 +20,7 @@ import { db } from "@/lib/firebase";
    Helpers
 ---------------------------------------------------------- */
 
-/** Create YYYY-MM-DD list between start & end (inclusive) */
+/** Inclusive list of YYYY-MM-DD strings between start & end */
 function daysBetween(startISO: string, endISO: string) {
   const out: string[] = [];
   const s = new Date(startISO + "T00:00:00");
@@ -34,7 +35,7 @@ function daysBetween(startISO: string, endISO: string) {
    Events / Members / Days / Activities
 ---------------------------------------------------------- */
 
-/** Create an event or trip (normalizes single-day events to start=end and creates the day) */
+/** Create an event or trip (single-day events normalize start=end and get a day doc) */
 export async function createEvent({
   ownerId,
   type,               // "event" | "trip"
@@ -52,11 +53,10 @@ export async function createEvent({
   endDate?: string | null;
   eventDate?: string | null;
 }) {
-  // For single-day events, normalize start/end to the same day for display
   const normalizedStart = type === "event" ? (eventDate ?? null) : (startDate ?? null);
   const normalizedEnd   = type === "event" ? (eventDate ?? null) : (endDate ?? null);
 
-  // 1) Create the parent event
+  // 1) Create parent event
   const ref = await addDoc(collection(db, "events"), {
     ownerId,
     type,
@@ -67,25 +67,27 @@ export async function createEvent({
     createdAt: serverTimestamp(),
   });
 
-  // 2) Add the owner as a member (role: owner) — include userId so collectionGroup queries work
+  // 2) Add owner as a member
   await setDoc(doc(db, `events/${ref.id}/members/${ownerId}`), {
     userId: ownerId,
     role: "owner",
     joinedAt: serverTimestamp(),
   });
 
-  // 3) If it's a single-day event, create one day doc (id = YYYY-MM-DD)
+  // 3) Create days
   if (type === "event" && eventDate) {
     await setDoc(doc(db, `events/${ref.id}/days/${eventDate}`), {
       dayId: eventDate,
       createdAt: serverTimestamp(),
     });
+  } else if (type === "trip" && normalizedStart && normalizedEnd) {
+    await ensureDaysForRange(ref.id, normalizedStart, normalizedEnd);
   }
 
   return ref.id;
 }
 
-/** Invite/add a friend as a member */
+/** Manually add a member (owner-only by rules) */
 export async function addMember(eventId: string, uid: string) {
   await setDoc(doc(db, `events/${eventId}/members/${uid}`), {
     userId: uid,
@@ -94,10 +96,9 @@ export async function addMember(eventId: string, uid: string) {
   });
 }
 
-/** For trips: create a day doc (use ISO date as ID) */
-export async function createDay(eventId: string, dayId: string /* "YYYY-MM-DD" */) {
-  const dayRef = doc(db, `events/${eventId}/days/${dayId}`);
-  await setDoc(dayRef, {
+/** Create a day doc (id = YYYY-MM-DD) */
+export async function createDay(eventId: string, dayId: string) {
+  await setDoc(doc(db, `events/${eventId}/days/${dayId}`), {
     dayId,
     createdAt: serverTimestamp(),
   });
@@ -115,40 +116,35 @@ export async function addActivity(
     notes?: string | null;
   }
 ) {
-  const actsCol = collection(db, `events/${eventId}/activities`);
-  const ref = await addDoc(actsCol, {
+  const ref = await addDoc(collection(db, `events/${eventId}/activities`), {
     ...activity,
     createdAt: serverTimestamp(),
   });
-  return ref.id; // activityId
+  return ref.id;
 }
 
 /* ----------------------------------------------------------
-   Overview helpers (counts, fetch)
+   Overview helpers
 ---------------------------------------------------------- */
 
 export async function getEvent(eventId: string) {
-  const ref = doc(db, "events", eventId);
-  const snap = await getDoc(ref);
+  const snap = await getDoc(doc(db, "events", eventId));
   if (!snap.exists()) throw new Error("Event not found");
   return { id: snap.id, ...(snap.data() as any) };
 }
 
 export async function countMembers(eventId: string) {
-  const col = collection(db, `events/${eventId}/members`);
-  const snap = await getDocs(col);
+  const snap = await getDocs(collection(db, `events/${eventId}/members`));
   return snap.size;
 }
 
 export async function countActivities(eventId: string) {
-  const col = collection(db, `events/${eventId}/activities`);
-  const snap = await getDocs(col);
+  const snap = await getDocs(collection(db, `events/${eventId}/activities`));
   return snap.size;
 }
 
 export async function listDayIds(eventId: string) {
-  const col = collection(db, `events/${eventId}/days`);
-  const snap = await getDocs(col);
+  const snap = await getDocs(collection(db, `events/${eventId}/days`));
   return snap.docs.map((d) => d.id).sort();
 }
 
@@ -160,7 +156,6 @@ export async function ensureDaysForRange(eventId: string, start: string, end: st
 
   const batch = writeBatch(db);
   let toWrite = 0;
-
   for (const id of wanted) {
     if (!have.has(id)) {
       batch.set(doc(db, `events/${eventId}/days/${id}`), {
@@ -173,27 +168,101 @@ export async function ensureDaysForRange(eventId: string, start: string, end: st
   if (toWrite) await batch.commit();
 }
 
-/** Alias kept for older imports (delegates to ensureDaysForRange) */
+/** Legacy alias */
 export async function ensureTripDays(eventId: string, start: string | null, end: string | null) {
   if (!start || !end) return;
   return ensureDaysForRange(eventId, start, end);
 }
 
-/** Create an invite token (MVP: link you can copy/share) */
+/* ----------------------------------------------------------
+   Invites
+---------------------------------------------------------- */
+
+/** Create an invite token (link will be /join/[token]?e={eventId}) */
 export async function createInvite(eventId: string, role: "editor" | "viewer" = "editor") {
   const token = crypto.randomUUID();
-  await setDoc(doc(db, `events/${eventId}/invites/${token}`), {
-    role,
-    status: "pending",
+  const ref = doc(db, `events/${eventId}/invites/${token}`);
+  await setDoc(ref, {
+    token,             // we query on this; keep it
+    role,              // "editor" | "viewer"
+    status: "pending", // rules validate during join
     createdAt: serverTimestamp(),
   });
-  // Your join route will be /join/[token]
   return token;
 }
 
+/**
+ * Find an invite by token across all events (still available for tooling).
+ * Requires a single-field index on invites.token (collection group).
+ */
+export async function findInviteByToken(token: string): Promise<null | {
+  eventId: string;
+  role: "editor" | "viewer";
+  status: "pending" | "accepted" | "expired";
+}> {
+  const qy = query(
+    collectionGroup(db, "invites"),
+    where("token", "==", token),
+    limit(1)
+  );
+  const snap = await getDocs(qy);
+  if (snap.empty) return null;
+
+  const inviteDoc = snap.docs[0];
+  const eventId = inviteDoc.ref.parent.parent?.id;
+  if (!eventId) return null;
+
+  // Re-read via absolute path for clarity
+  const abs = await getDoc(doc(db, `events/${eventId}/invites/${token}`));
+  if (!abs.exists()) return null;
+
+  const data = abs.data() as any;
+  return {
+    eventId,
+    role: (data.role ?? "editor"),
+    status: (data.status ?? "pending"),
+  };
+}
+
+/** Direct read by eventId + token (used by the new join flow) */
+export async function getInviteForEvent(eventId: string, token: string) {
+  const ref = doc(db, `events/${eventId}/invites/${token}`);
+  const snap = await getDoc(ref);
+  if (!snap.exists()) return null;
+  const data = snap.data() as any;
+  return {
+    eventId,
+    role: (data.role ?? "editor") as "editor" | "viewer",
+    status: (data.status ?? "pending") as "pending" | "accepted" | "expired",
+  };
+}
+
+/** Join using the invite token (rules validate inviteToken/status/role) */
+export async function joinEventWithToken({
+  eventId, token, uid
+}: { eventId: string; token: string; uid: string }) {
+  const found = await getInviteForEvent(eventId, token);
+  if (!found) throw new Error("Invite not found.");
+  if (found.status !== "pending") throw new Error("Invite is not valid anymore.");
+
+  const memRef = doc(db, `events/${eventId}/members/${uid}`);
+  const memSnap = await getDoc(memRef);
+  if (memSnap.exists()) {
+    return { eventId, already: true };
+  }
+
+  await setDoc(memRef, {
+    userId: uid,
+    role: found.role,
+    inviteToken: token,
+    joinedAt: serverTimestamp(),
+  });
+
+  return { eventId, already: false };
+}
+
 /* ----------------------------------------------------------
-   Shared Reference Photos (activity hero)
-   - Any member can add
+   Reference Photos
 ---------------------------------------------------------- */
 
 export async function addRefPhoto(
@@ -201,68 +270,64 @@ export async function addRefPhoto(
   activityId: string,
   data: { url: string; width: number; height: number; uploadedBy: string }
 ) {
-  const col = collection(db, `events/${eventId}/activities/${activityId}/refPhotos`);
-  await addDoc(col, {
+  await addDoc(collection(db, `events/${eventId}/activities/${activityId}/refPhotos`), {
     ...data,
     createdAt: serverTimestamp(),
   });
 }
 
 export async function listRefPhotos(eventId: string, activityId: string) {
-  const col = collection(db, `events/${eventId}/activities/${activityId}/refPhotos`);
-  const qy = query(col, orderBy("createdAt", "desc"));
+  const qy = query(
+    collection(db, `events/${eventId}/activities/${activityId}/refPhotos`),
+    orderBy("createdAt", "desc")
+  );
   const snap = await getDocs(qy);
   return snap.docs.map((d) => ({ id: d.id, ...(d.data() as any) }));
 }
 
 /* ----------------------------------------------------------
-   Outfits (per user per activity)
-   - Outfit doc at outfits/{uid}
-   - Photos at outfits/{uid}/photos/*
+   Outfits
 ---------------------------------------------------------- */
 
-/** Upsert the current user's outfit metadata (notes/items) */
 export async function upsertOutfitMeta(
   eventId: string,
   activityId: string,
   uid: string,
   data: { items?: string[]; notes?: string | null }
 ) {
-  const ref = doc(db, `events/${eventId}/activities/${activityId}/outfits/${uid}`);
-  await setDoc(ref, { ...data, updatedAt: serverTimestamp() }, { merge: true });
+  await setDoc(
+    doc(db, `events/${eventId}/activities/${activityId}/outfits/${uid}`),
+    { ...data, updatedAt: serverTimestamp() },
+    { merge: true }
+  );
 }
 
-/** Add a photo to the current user's outfit */
 export async function addOutfitPhoto(
   eventId: string,
   activityId: string,
   uid: string,
   data: { url: string; width: number; height: number }
 ) {
-  const col = collection(db, `events/${eventId}/activities/${activityId}/outfits/${uid}/photos`);
-  await addDoc(col, { ...data, createdAt: serverTimestamp() });
+  await addDoc(
+    collection(db, `events/${eventId}/activities/${activityId}/outfits/${uid}/photos`),
+    { ...data, createdAt: serverTimestamp() }
+  );
 }
 
-/** Get all outfits (with photos) for an activity, keyed by uid */
 export async function listOutfitsWithPhotos(eventId: string, activityId: string) {
   const outfitsCol = collection(db, `events/${eventId}/activities/${activityId}/outfits`);
   const outfitSnap = await getDocs(outfitsCol);
 
-  const result: Record<
-    string,
-    { uid: string; notes?: string | null; items?: string[]; photos: any[] }
-  > = {};
-
+  const result: Record<string, { uid: string; notes?: string | null; items?: string[]; photos: any[] }> = {};
   for (const docSnap of outfitSnap.docs) {
     const uid = docSnap.id;
     const data = docSnap.data() as any;
 
-    const photosCol = collection(
-      db,
-      `events/${eventId}/activities/${activityId}/outfits/${uid}/photos`
+    const photosQ = query(
+      collection(db, `events/${eventId}/activities/${activityId}/outfits/${uid}/photos`),
+      orderBy("createdAt", "desc")
     );
-    const qy = query(photosCol, orderBy("createdAt", "desc"));
-    const photosSnap = await getDocs(qy);
+    const photosSnap = await getDocs(photosQ);
 
     result[uid] = {
       uid,
@@ -274,17 +339,16 @@ export async function listOutfitsWithPhotos(eventId: string, activityId: string)
   return result;
 }
 
-/* ----------------------------------------------------------
-   (Legacy) Single upsertOutfit that stored photoUrl on the doc
-   – Keeping for compatibility if something else references it.
----------------------------------------------------------- */
-
+/** Legacy single-upsert that stored photoUrl on the outfit doc */
 export async function upsertOutfit(
   eventId: string,
   activityId: string,
   uid: string,
   data: { photoUrl?: string | null; items?: string[]; notes?: string | null }
 ) {
-  const ref = doc(db, `events/${eventId}/activities/${activityId}/outfits/${uid}`);
-  await setDoc(ref, { ...data, updatedAt: serverTimestamp() }, { merge: true });
+  await setDoc(
+    doc(db, `events/${eventId}/activities/${activityId}/outfits/${uid}`),
+    { ...data, updatedAt: serverTimestamp() },
+    { merge: true }
+  );
 }

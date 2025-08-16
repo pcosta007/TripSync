@@ -1,21 +1,27 @@
-"use client";
-import { ReactNode, useEffect, useState } from "react";
-import { onAuthStateChanged } from "firebase/auth";
-import { auth } from "@/lib/firebase";
-import { useRouter } from "next/navigation";
+// app/(protected)/layout.tsx
+import "./protected.css";
+import type { Metadata, Viewport } from "next";
 
-export default function ProtectedLayout({ children }: { children: ReactNode }) {
-  const router = useRouter();
-  const [ready, setReady] = useState(false);
+export const viewport: Viewport = {
+  width: "device-width",
+  initialScale: 1,
+  viewportFit: "cover",
+};
 
-  useEffect(() => {
-    const unsub = onAuthStateChanged(auth, (user) => {
-      if (!user) router.replace("/login");
-      else setReady(true);
-    });
-    return unsub;
-  }, [router]);
+export const metadata: Metadata = {
+  title: "TripSync",
+  themeColor: "#264864",
+  appleWebApp: {
+    capable: true,
+    statusBarStyle: "black-translucent",
+    title: "TripSync",
+  },
+};
 
-  if (!ready) return null; // or a tiny loading screen
+export default function ProtectedLayout({
+  children,
+}: {
+  children: React.ReactNode;
+}) {
   return <>{children}</>;
 }

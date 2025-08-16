@@ -10,6 +10,10 @@ import {
 } from "firebase/firestore";
 import { createEvent } from "@/lib/events";
 
+// ✅ shared UI (the FitList-style header & bottom nav)
+import HeaderFitlist from "@/app/components/HeaderFitlist";
+import BottomNavFitlist from "@/app/components/BottomNavFitlist";
+
 type EventDoc = {
   id: string;
   name: string;
@@ -49,7 +53,7 @@ export default function EventsPage() {
         memSnap.forEach((m) => {
           // path: events/{eventId}/members/{uid}
           const parts = m.ref.path.split("/");
-          const eid = parts[1]; // "events", "{eventId}", "members", "{uid}"
+          const eid = parts[1];
           if (eid) eventIds.add(eid);
         });
 
@@ -72,7 +76,7 @@ export default function EventsPage() {
           })
         );
 
-        // 4) Fallback: events you own (in case membership list is empty)
+        // 4) Fallback: events you own
         if (list.length === 0) {
           try {
             const qOwn = query(collection(db, "events"), where("ownerId", "==", user.uid));
@@ -97,7 +101,7 @@ export default function EventsPage() {
         setItems(list);
       } catch (err: any) {
         console.error("[events] load error:", err?.code, err?.message, err);
-        setItems([]); // safe empty state
+        setItems([]);
       } finally {
         setLoading(false);
       }
@@ -115,7 +119,8 @@ export default function EventsPage() {
 
   return (
     <div className="iphone-wrap">
-      <Header />
+      {/* ✅ shared sticky header (TripSync brand) */}
+      <HeaderFitlist />
 
       <main className="content">
         <div className="toolbar">
@@ -155,7 +160,12 @@ export default function EventsPage() {
         )}
       </main>
 
-      <BottomNav />
+      {/* ✅ shared bottom nav (FitList style) */}
+      <BottomNavFitlist
+        active="home"
+        onPlus={() => setShowNew("trip")}
+        onSignOut={() => auth.signOut()}
+      />
 
       {showNew && (
         <NewEventSheet
@@ -216,65 +226,7 @@ export default function EventsPage() {
   );
 }
 
-/* ---------- UI bits ---------- */
-
-function Header() {
-  return (
-    <header className="hdr">
-      <div className="brand">
-        <svg width="24" height="24" viewBox="0 0 256 256" fill="none" aria-hidden="true">
-          <rect x="36" y="68" width="184" height="140" rx="20" stroke="#264864" strokeWidth="12"/>
-          <path d="M92 68V52c0-11 9-20 20-20h32c11 0 20 9 20 20v16" stroke="#264864" strokeWidth="12"/>
-          <path d="M88 138l28 28 52-56" stroke="#264864" strokeWidth="12"/>
-        </svg>
-        <span className="brand-text">FitList Friends</span>
-      </div>
-      <style jsx>{`
-        .hdr{
-          position:sticky; top:0; z-index:5;
-          background:#fff; border-bottom:1px solid #e2e8f0;
-          padding: calc(10px + env(safe-area-inset-top)) 12px 10px;
-        }
-        .brand{ display:flex; align-items:center; gap:8px; }
-        .brand-text{ color:#264864; font-weight:700; }
-      `}</style>
-    </header>
-  );
-}
-
-function BottomNav() {
-  return (
-    <nav className="bn">
-      <button className="nav-btn active">
-        <span className="icon">🏠</span>
-        <span className="label">Home</span>
-      </button>
-      <button className="nav-btn" onClick={()=>window.scrollTo({top:0,behavior:"smooth"})}>
-        <span className="icon">➕</span>
-        <span className="label">New</span>
-      </button>
-      <button className="nav-btn" onClick={()=>auth.signOut()}>
-        <span className="icon">👤</span>
-        <span className="label">Sign out</span>
-      </button>
-      <style jsx>{`
-        .bn{
-          position: fixed; left:0; right:0; bottom:0;
-          background:#fff; border-top:1px solid #e2e8f0;
-          display:grid; grid-template-columns: repeat(3,1fr);
-          gap:0; padding: 2px 10px calc(2px + env(safe-area-inset-bottom));
-          z-index:10;
-        }
-        .nav-btn{
-          appearance:none; background:transparent; border:0;
-          padding: 6px; display:grid; justify-items:center; gap:4px;
-          font-size:11px; color:#64748b; cursor:pointer;
-        }
-        .nav-btn.active{ color:#264864; font-weight:700; }
-      `}</style>
-    </nav>
-  );
-}
+/* ---------- helpers & sheet ---------- */
 
 function dateRange(a?: string | null, b?: string | null) {
   if (!a || !b) return "";
